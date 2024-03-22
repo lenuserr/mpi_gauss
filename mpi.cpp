@@ -1,5 +1,7 @@
 #define EPS 1e-14
 // 22.03.24. 12:00 let's go mpi gauss.
+// 15:30. Обратный ход Гаусса осталось.
+// Норму матрицы потом посчитать и заменить арг.
 #include "mpi.h"
 #include <stdio.h>
 #include <string.h>
@@ -182,6 +184,36 @@ void print_matrix(double* a, int n, int m, int p, int k,
     }
 }
 
+void print_b(double* a, int n, int m, int p, int k,
+    double* buf, int max_print, MPI_Comm com) {
+
+    int main_k = 0; /*только 0*/
+    int max_b = (n + m - 1) / m;
+    int printed_rows = 0;
+    for (int b = 0; b < max_b; ++b) {
+        // owner of row
+        int owner = b % p;
+        // num of rows
+        int num_rows = (b + 1) * m <= n ? m : n - b * m; 
+        // loc num of row
+        int b_loc = b / p;
+        if (k == main_k) {
+            if (owner == main_k) {
+                // строка у главного процесса
+                printed_rows += print_array(a + b_loc*m, 1, num_rows, printed_rows, max_print);
+            } else {
+                MPI_Status st;
+                MPI_Recv(buf, num_rows, MPI_DOUBLE, owner, 0/*tag*/, com, &st);
+                // вывести из буфера
+                printed_rows += print_array(buf, 1, num_rows, printed_rows, max_print);
+            }
+        } else if (owner == k) {
+            // остальные 
+            MPI_Send(a + b_loc*m, num_rows, MPI_DOUBLE, main_k, 0/*tag*/, com);
+        }
+    }
+}
+
 // печать прямоугольной матрицы m x n не более чем max_print
 // при этом printed_rows уже выведены
 int print_array(double* a, int n, int m, int printed_rows, int max_print) {
@@ -204,8 +236,9 @@ int print_array(double* a, int n, int m, int printed_rows, int max_print) {
 void solution(int argc, char* argv[], MPI_Comm com, int p, int k);
 void get_block(int i, int j, int n, int m, int f, int l, double* matrix, double* block1);
 void put_block(int i, int j, int n, int m, int k, int l, double* block, double* matrix);
-bool inverse_matrix(int m, double* matrix, double* identity, double a_norm);
+void put_vector(int i, int m, int k, int l, double* b_i, double* b);
 void swap_rows(double* matrix, int n, int i, int j);
+bool inverse_matrix(int m, double* matrix, double* identity, double a_norm);
 void matrix_product(int n, int m, int k, double* a, double* b, double* c);
 void subtract_matrix_inplace(int n, int m, double* a, double* b);
 
@@ -231,7 +264,9 @@ void solution(int argc, char* argv[], MPI_Comm com, int p, int k) {
 
     int rows = get_rows(n, m, p, k);
     double* a = new double[rows*m*n];
+    double* b = new double[rows*m];
     double* buf = new double[m*n];
+    double* buf_b = new double[m];
     double* block1 = new double[m*m];
     double* block2 = new double[m*m];
     double* block3 = new double[m*m];
@@ -243,11 +278,10 @@ void solution(int argc, char* argv[], MPI_Comm com, int p, int k) {
         read_matrix(a, n, m, p, k, name_file, buf /* буфер m x n на блочную строку */, com);
     }
 
-    print_matrix(a, n, m, p, k, buf, r, com);
-    
-    int xxx = 0;
-    int err = 0;
-    
+    init_b(a, b, n, m, p, k);
+    //print_matrix(a, n, m, p, k, buf, r, com);
+    //print_b(b, n, m, p, k, buf, r, com);
+
     int f = n / m;
     int l = n - f * m;
     int h = l ? f + 1 : f;
@@ -270,13 +304,17 @@ void solution(int argc, char* argv[], MPI_Comm com, int p, int k) {
                 put_block(i_loc_m, f, n, m, f, l, block3, a);
             }
 
-            //matrix_product(m, m, 1, block2, b + m * i_loc_m, block3); 
-            //put_vector(i_loc_m, m, f, l, block3, b);
+            matrix_product(m, m, 1, block2, b + m * i_loc_m, block3); 
+            put_vector(i_loc_m, m, f, l, block3, b);
 
             memcpy(buf, a + m*n*i_loc_m, n*m*sizeof(double)); 
+            memcpy(buf_b, b + m*i_loc_m, m*sizeof(double));
         } 
 
+        // насколько тут всё плохо и можно ли сделать лучше, чтобы не было двух обменов?
         MPI_Bcast(buf, n*m, MPI_DOUBLE, main_k, com);
+        MPI_Bcast(buf_b, m, MPI_DOUBLE, main_k, com); 
+        
         int offset = main_k <= k ? k - main_k : p + k - main_k; 
         int loc_start_m = (i_glob_m + offset) / p;
         if (k == main_k) { loc_start_m++; }
@@ -293,20 +331,21 @@ void solution(int argc, char* argv[], MPI_Comm com, int p, int k) {
                 subtract_matrix_inplace(m, m, block2, block3);
                 put_block(i, j, n, m, f, l, block2, a);
             }
-        }
 
-        MPI_Bcast(&err, 1, MPI_INT, xxx, com); 
+            matrix_product(multiplier_rows, m, 1, block1, buf_b, block3);
+            subtract_matrix_inplace(1, multiplier_rows, b + m*i, block3);
+        }
     }
     
-    /*
-    if (k == 0) {
-        printf("\n\n");
-    }
-    print_matrix(a, n, m, p, k, buf, r, com);
-    */
+    // if l and обратный ход гаусса летс го делать.
+
+    //print_matrix(a, n, m, p, k, buf, r, com);
+    //print_b(b, n, m, p, k, buf, r, com);
 
     delete[] a;
+    delete[] b;
     delete[] buf;
+    delete[] buf_b;
     delete[] block1;
     delete[] block2;
     delete[] block3;
@@ -336,6 +375,13 @@ void put_block(int i, int j, int n, int m, int k, int l, double* block, double* 
             matrix[n * (m * i + p) + m * j + q] = block[ind];
             ind++;
         }
+    }
+}
+
+void put_vector(int i, int m, int k, int l, double* b_i, double* b) {
+    int length = i < k ? m : l;
+    for (int p = 0; p < length; ++p) {
+        b[m*i + p] = b_i[p];
     }
 }
 
