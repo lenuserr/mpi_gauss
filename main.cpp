@@ -1,24 +1,22 @@
 #define EPS 1e-14
-// 19:40. Осталось добавить:
-// 1). Подсчёт обоих невязок.
-// 2). Обработку ошибок (если матрица не обращается типо).
-// 3). Посчитать норму матрицы и нормально использовать её в коде.
-// 4). Подсчёт времени работы одного процесса.
-// 5). Написать makefile, чтобы программа собиралась так, как требуется.
+// 00:50. Осталось добавить:
+// 1). Подсчёт времени работы одного процесса.
+// 2). Подсчёт обоих невязок.
 #include "mpi.h"
 #include <stdio.h>
 #include <string.h>
 #include <string>
 #include <cmath>
+#include "main.h"
 
-int l2g(int n, int m, int p, int k, int i_loc) {
+int l2g(int m, int p, int k, int i_loc) {
     int i_loc_m = i_loc / m;
     int i_glob_m = i_loc_m * p + k;
     return i_glob_m * m + i_loc % m;
 }
 
 // global to local, если разделение по строкам
-int g2l(int n, int m, int p, int i_glob) {
+int g2l(int m, int p, int i_glob) {
     int i_glob_m = i_glob / m;
     int i_loc_m = i_glob_m / p;
     return i_loc_m * m + i_glob % m;
@@ -38,32 +36,17 @@ int get_rows(int n, int m, int p, int k) {
 }
 
 // в каком процессе лежит строка i_glob
-int get_k(int n, int m, int p, int i_glob) {
+int get_k(int m, int p, int i_glob) {
     int i_glob_m = i_glob / m;
     return i_glob_m % p;
 }
 
-double f(int s, int n, int i, int j) { 
-    switch(s) {
-        case 1:
-            return n - std::max(i, j);
-        case 2:
-            return std::max(i, j) + 1;
-        case 3:
-            return std::fabs(i-j);
-        case 4:
-            return 1. / (i + j + 1);
-        default:
-            return 1;
-    }
-}
-
-void init_matrix(double* a, /* своя часть */ int n, int m, int p, int k, int s, double (*f)(int, int, int, int)) {
+void init_matrix(double* a, int n, int m, int p, int k, int s, double (*f)(int, int, int, int)) {
     int rows = get_rows(n, m, p, k); // число блочных строк в процессе k
 
     for (int i_loc_m = 0; i_loc_m < rows; ++i_loc_m) {
         for (int i_loc = i_loc_m * m; i_loc < (i_loc_m + 1) * m; ++i_loc) {
-            int i_glob = l2g(n, m, p, k, i_loc);
+            int i_glob = l2g(m, p, k, i_loc);
             if (i_glob >= n) {
                 break;
             }
@@ -79,7 +62,7 @@ void init_b(double* a, double* b, int n, int m, int p, int k) {
 
     for (int i_loc_m = 0; i_loc_m < rows; ++i_loc_m) {
         for (int i_loc = i_loc_m * m; i_loc < (i_loc_m + 1) * m; ++i_loc) {
-            int i_glob = l2g(n, m, p, k, i_loc);
+            int i_glob = l2g(m, p, k, i_loc);
             if (i_glob >= n) {
                 break;
             }
@@ -90,6 +73,174 @@ void init_b(double* a, double* b, int n, int m, int p, int k) {
             }
             b[i_loc] = sum; 
         }
+    }
+}
+
+// печать прямоугольной матрицы m x n не более чем max_print
+// при этом printed_rows уже выведены
+int print_array(double* a, int n, int m, int printed_rows, int max_print) {
+    if (printed_rows >= max_print) {
+        return 0;
+    }
+
+    int p_n = (n > max_print ? max_print : n);
+    int p_m = printed_rows + m < max_print ? m : max_print - printed_rows;
+    for (int i = 0; i < p_m; ++i) {
+        for (int j = 0; j < p_n; ++j) {
+            printf(" %10.3e", a[i*n + j]);
+        }
+        printf("\n");
+    }
+
+    return p_m;
+}
+
+void get_block(int i, int j, int n, int m, int f, int l, double* matrix, double* block1) {
+    int h = i < f ? m : l;
+    int w = j < f ? m : l;
+    
+    int ind = 0;
+
+    for (int p = 0; p < h; ++p) {
+        for (int q = 0; q < w; ++q) {
+            block1[ind] = matrix[n * (m * i + p) + m * j + q];
+            ind++;
+        }
+    }
+}
+
+void put_block(int i, int j, int n, int m, int k, int l, double* block, double* matrix) {
+    int h = i < k ? m : l;
+    int w = j < k ? m : l;
+
+    int ind = 0;
+    for (int p = 0; p < h; ++p) {
+        for (int q = 0; q < w; ++q) {
+            matrix[n * (m * i + p) + m * j + q] = block[ind];
+            ind++;
+        }
+    }
+}
+
+void put_vector(int i, int m, int k, int l, double* b_i, double* b) {
+    int length = i < k ? m : l;
+    for (int p = 0; p < length; ++p) {
+        b[m*i + p] = b_i[p];
+    }
+}
+
+void subtract_matrix_inplace(int n, int m, double* a, double* b) {
+    for (int i = 0; i < n; ++i) {
+        for (int j = 0; j < m; ++j) {
+            a[m*i + j] -= b[m*i + j];           
+        }
+    }
+}
+
+void swap_rows(double* matrix, int n, int i, int j) {
+    for (int k = 0; k < n; ++k) {
+        std::swap(matrix[n*i + k], matrix[n*j + k]);
+    }
+}
+
+bool inverse_matrix(int m, double* matrix, double* identity, double a_norm) {
+
+    for (int i = 0; i < m; ++i) {
+        for (int j = 0; j < m; ++j) {
+            identity[i * m + j] = (i != j) ? 0 : 1;
+        }
+    }
+
+    for (int i = 0; i < m; ++i) {
+        double max_elem = matrix[i * m + i];
+        int row_max_elem = i;
+        for (int j = i + 1; j < m; ++j) {
+            if (std::fabs(matrix[j * m + i]) > std::fabs(max_elem)) {
+                max_elem = matrix[j * m + i];
+                row_max_elem = j;
+            }
+        }
+
+        swap_rows(matrix, m, i, row_max_elem);
+        swap_rows(identity, m, i, row_max_elem);
+
+        if (std::fabs(max_elem) < EPS * a_norm) {
+            return false;    
+        }
+
+        double factor = 1 / max_elem;
+        for (int s = 0; s < i; ++s) {
+            identity[i * m + s] *= factor;
+        }
+
+        for (int s = i; s < m; ++s) {
+            matrix[i * m + s] *= factor;
+            identity[i * m + s] *= factor;
+        }
+
+        for (int k = i + 1; k < m; ++k) {
+            double multiplier = -matrix[k * m + i];
+            for (int p = 0; p < i + 1; ++p) {
+                identity[k * m + p] += identity[i * m + p] * multiplier;
+            }
+
+            for (int p = i + 1; p < m; ++p) { 
+                matrix[k * m + p] += matrix[i * m + p] * multiplier;
+                identity[k * m + p] += identity[i * m + p] * multiplier;
+            }
+        }
+    }
+
+    for (int i = m - 1; i > 0; --i) {
+        for (int k = i - 1; k >= 0; --k) {
+            double multiplier = -matrix[k * m + i];
+            for (int p = 0; p < m; ++p) { 
+                identity[k * m + p] += identity[i * m + p] * multiplier;
+            }
+        }
+    }
+
+    return true;
+}
+
+double matrix_norm(double* a, /* своя часть */ int n, int m, int p, int k, MPI_Comm com) {
+    int rows = get_rows(n, m, p, k);
+    
+    double norm = -1;
+    double global_sum;
+    double sum;
+    for (int j = 0; j < n; ++j) {
+        sum = 0;
+        for (int i_loc_m = 0; i_loc_m < rows; ++i_loc_m) {
+            for (int i_loc = i_loc_m * m; i_loc < (i_loc_m + 1) * m; ++i_loc) {
+                int i_glob = l2g(m, p, k, i_loc);
+                if (i_glob >= n) {
+                    break;
+                }
+
+                sum += std::fabs(a[n*i_loc + j]);
+            }
+        }
+
+        MPI_Allreduce(&sum, &global_sum, 1, MPI_DOUBLE, MPI_SUM, com);
+        norm = std::max(norm, global_sum);
+    }
+
+    return norm;
+}
+
+double f(int s, int n, int i, int j) { 
+    switch(s) {
+        case 1:
+            return n - std::max(i, j);
+        case 2:
+            return std::max(i, j) + 1;
+        case 3:
+            return std::fabs(i-j);
+        case 4:
+            return 1. / (i + j + 1);
+        default:
+            return 1;
     }
 }
 
@@ -156,7 +307,6 @@ int read_matrix(double* a, int n, int m, int p, int k,
     return 0;
 }
 
-int print_array(double* a, int n, int m, int printed_rows, int max_print);
 void print_matrix(double* a, int n, int m, int p, int k,
     double* buf, int max_print, MPI_Comm com) {
 
@@ -217,34 +367,7 @@ void print_b(double* a, int n, int m, int p, int k,
     }
 }
 
-// печать прямоугольной матрицы m x n не более чем max_print
-// при этом printed_rows уже выведены
-int print_array(double* a, int n, int m, int printed_rows, int max_print) {
-    if (printed_rows >= max_print) {
-        return 0;
-    }
-
-    int p_n = (n > max_print ? max_print : n);
-    int p_m = printed_rows + m < max_print ? m : max_print - printed_rows;
-    for (int i = 0; i < p_m; ++i) {
-        for (int j = 0; j < p_n; ++j) {
-            printf(" %10.3e", a[i*n + j]);
-        }
-        printf("\n");
-    }
-
-    return p_m;
-}
-
 void solution(int argc, char* argv[], MPI_Comm com, int p, int k);
-void get_block(int i, int j, int n, int m, int f, int l, double* matrix, double* block1);
-void put_block(int i, int j, int n, int m, int k, int l, double* block, double* matrix);
-void put_vector(int i, int m, int k, int l, double* b_i, double* b);
-void swap_rows(double* matrix, int n, int i, int j);
-bool inverse_matrix(int m, double* matrix, double* identity, double a_norm);
-void matrix_product(int n, int m, int k, double* a, double* b, double* c);
-void subtract_matrix_inplace(int n, int m, double* a, double* b);
-
 int main(int argc, char* argv[]) {
 
     int p, k;
@@ -260,6 +383,8 @@ int main(int argc, char* argv[]) {
 }
 
 void solution(int argc, char* argv[], MPI_Comm com, int p, int k) {
+    const int task = 9;
+
     int n = std::stoi(argv[1]);
     int m = std::stoi(argv[2]);
     int r = std::stoi(argv[3]);
@@ -267,35 +392,52 @@ void solution(int argc, char* argv[], MPI_Comm com, int p, int k) {
 
     int rows = get_rows(n, m, p, k);
     double* a = new double[rows*m*n];
-    double* b = new double[rows*m];
-    double* x = new double[n];
     double* buf = new double[m*n];
-    double* buf_b = new double[m];
-    double* block1 = new double[m*m];
-    double* block2 = new double[m*m];
-    double* block3 = new double[m*m];
+    
+    double t1 = 0, t2 = 0;
 
     if (s) {
         init_matrix(a, /* своя часть */ n, m, p, k, s, &f);
     } else {
         const char* name_file = argv[argc - 1];
-        read_matrix(a, n, m, p, k, name_file, buf /* буфер m x n на блочную строку */, com);
+        if (read_matrix(a, n, m, p, k, name_file, buf /* буфер m x n на блочную строку */, com)) {
+            
+            if (k == 0) {
+                printf (
+                "%s : Task = %d Res1 = %e Res2 = %e T1 = %.2f T2 = %.2f S = %d N = %d M = %d P = %d\n",
+                argv[0], task, -1., -1., t1, t2, s, n, m, p);
+            }
+
+            delete[] a;
+            delete[] buf;
+            return;
+        }
     }
+
+    double* b = new double[rows*m];
+    double* x = new double[n];
+    double* buf_b = new double[m];
+    double* block1 = new double[m*m];
+    double* block2 = new double[m*m];
+    double* block3 = new double[m*m];
 
     init_b(a, b, n, m, p, k);
     //print_matrix(a, n, m, p, k, buf, r, com);
     //print_b(b, n, m, p, k, buf, r, com);
 
+    double a_norm = matrix_norm(a, n, m, p, k, com);
     int f = n / m;
     int l = n - f * m;
     int h = l ? f + 1 : f;
 
+    int err = 0;
     for (int i_glob_m = 0; i_glob_m < f; ++i_glob_m) {
         int i_loc_m = i_glob_m / p;
         int main_k = i_glob_m % p; 
         if (k == main_k) {
             get_block(i_loc_m, i_glob_m, n, m, f, l, a, block1);
-            inverse_matrix(m, block1, block2, 1e-10); // НОРМУ МАТРИЦЫ ПОТОМ ПОСЧИТАТЬ И ЗАМЕНИТЬ АРГ.            
+            // НОРМУ МАТРИЦЫ ПОТОМ ПОСЧИТАТЬ И ЗАМЕНИТЬ АРГ.
+            if (!inverse_matrix(m, block1, block2, a_norm)) { err = -1; }             
             for (int j_glob_m = i_glob_m; j_glob_m < f; ++j_glob_m) {
                 get_block(i_loc_m, j_glob_m, n, m, f, l, a, block1); 
                 matrix_product(m, m, m, block2, block1, block3); 
@@ -315,9 +457,28 @@ void solution(int argc, char* argv[], MPI_Comm com, int p, int k) {
             memcpy(buf_b, b + m*i_loc_m, m*sizeof(double));
         } 
 
-        // насколько тут всё плохо и можно ли сделать лучше, чтобы не было двух обменов?
+        // насколько тут всё плохо и можно ли сделать лучше, чтобы не было столько обменов?
         MPI_Bcast(buf, n*m, MPI_DOUBLE, main_k, com);
         MPI_Bcast(buf_b, m, MPI_DOUBLE, main_k, com); 
+        MPI_Bcast(&err, 1, MPI_INT, main_k, com);
+
+        if (err) {
+            if (k == 0) {
+                printf (
+                "%s : Task = %d Res1 = %e Res2 = %e T1 = %.2f T2 = %.2f S = %d N = %d M = %d P = %d\n",
+                argv[0], task, -1., -1., t1, t2, s, n, m, p);
+            }
+
+            delete[] a;
+            delete[] b;
+            delete[] x;
+            delete[] buf;
+            delete[] buf_b;
+            delete[] block1;
+            delete[] block2;
+            delete[] block3;
+            return;
+        }
         
         int offset = main_k <= k ? k - main_k : p + k - main_k; 
         int loc_start_m = (i_glob_m + offset) / p;
@@ -325,7 +486,7 @@ void solution(int argc, char* argv[], MPI_Comm com, int p, int k) {
 
         for (int i = loc_start_m; i < rows; ++i) {
             get_block(i, i_glob_m, n, m, f, l, a, block1);
-            int multiplier_rows = (m + l2g(n, m, p, k, i * m) <= n ? m : l);
+            int multiplier_rows = (m + l2g(m, p, k, i * m) <= n ? m : l);
             for (int j = 0; j < h; ++j) {
                 int block_cols = j < f ? m : l;
                 get_block(0, j, n, m, f, l, buf, block2); 
@@ -343,9 +504,28 @@ void solution(int argc, char* argv[], MPI_Comm com, int p, int k) {
     // if l and обратный ход гаусса летс го делать.
     if (l && f % p == k) {
         get_block(f/p, f, n, m, f, l, a, block1);  
-        inverse_matrix(l, block1, block2, 1e-10); // НОРМУ МАТРИЦЫ ПОТОМ ПОСЧИТАТЬ И ЗАМЕНИТЬ АРГ.
+        // НОРМУ МАТРИЦЫ ПОТОМ ПОСЧИТАТЬ И ЗАМЕНИТЬ АРГ.
+        if (!inverse_matrix(l, block1, block2, a_norm)) { err = -1; } 
         matrix_product(l, l, 1, block2, b + m*(f/p), block3);
     }
+
+    if (err) {
+        if (k == 0) {
+            printf (
+            "%s : Task = %d Res1 = %e Res2 = %e T1 = %.2f T2 = %.2f S = %d N = %d M = %d P = %d\n",
+            argv[0], task, -1., -1., t1, t2, s, n, m, p);
+        }
+
+        delete[] a;
+        delete[] b;
+        delete[] x;
+        delete[] buf;
+        delete[] buf_b;
+        delete[] block1;
+        delete[] block2;
+        delete[] block3;
+        return;
+    }    
 
     if (l) { // сюда зайдут либо все процессы, либо никакой, поэтому всё норм
         MPI_Bcast(block3, l, MPI_DOUBLE, f % p, com);
@@ -379,6 +559,14 @@ void solution(int argc, char* argv[], MPI_Comm com, int p, int k) {
     //print_matrix(a, n, m, p, k, buf, r, com);
     //print_b(b, n, m, p, k, buf, r, com);
 
+    if (k == 0) { 
+        printf("x:\n");
+        for (int i = 0; i < r; ++i) {
+            printf(" %10.3e", x[i]);
+        }
+        printf("\n");
+    }
+
     delete[] a;
     delete[] b;
     delete[] x;
@@ -387,187 +575,4 @@ void solution(int argc, char* argv[], MPI_Comm com, int p, int k) {
     delete[] block1;
     delete[] block2;
     delete[] block3;
-}
-
-void get_block(int i, int j, int n, int m, int f, int l, double* matrix, double* block1) {
-    int h = i < f ? m : l;
-    int w = j < f ? m : l;
-    
-    int ind = 0;
-
-    for (int p = 0; p < h; ++p) {
-        for (int q = 0; q < w; ++q) {
-            block1[ind] = matrix[n * (m * i + p) + m * j + q];
-            ind++;
-        }
-    }
-}
-
-void put_block(int i, int j, int n, int m, int k, int l, double* block, double* matrix) {
-    int h = i < k ? m : l;
-    int w = j < k ? m : l;
-
-    int ind = 0;
-    for (int p = 0; p < h; ++p) {
-        for (int q = 0; q < w; ++q) {
-            matrix[n * (m * i + p) + m * j + q] = block[ind];
-            ind++;
-        }
-    }
-}
-
-void put_vector(int i, int m, int k, int l, double* b_i, double* b) {
-    int length = i < k ? m : l;
-    for (int p = 0; p < length; ++p) {
-        b[m*i + p] = b_i[p];
-    }
-}
-
-void swap_rows(double* matrix, int n, int i, int j) {
-    for (int k = 0; k < n; ++k) {
-        std::swap(matrix[n*i + k], matrix[n*j + k]);
-    }
-}
-
-void subtract_matrix_inplace(int n, int m, double* a, double* b) {
-    for (int i = 0; i < n; ++i) {
-        for (int j = 0; j < m; ++j) {
-            a[m*i + j] -= b[m*i + j];           
-        }
-    }
-}
-
-bool inverse_matrix(int m, double* matrix, double* identity, double a_norm) {
-
-    for (int i = 0; i < m; ++i) {
-        for (int j = 0; j < m; ++j) {
-            identity[i * m + j] = (i != j) ? 0 : 1;
-        }
-    }
-
-    for (int i = 0; i < m; ++i) {
-        double max_elem = matrix[i * m + i];
-        int row_max_elem = i;
-        for (int j = i + 1; j < m; ++j) {
-            if (std::fabs(matrix[j * m + i]) > std::fabs(max_elem)) {
-                max_elem = matrix[j * m + i];
-                row_max_elem = j;
-            }
-        }
-
-        swap_rows(matrix, m, i, row_max_elem);
-        swap_rows(identity, m, i, row_max_elem);
-
-        if (std::fabs(max_elem) < EPS * a_norm) {
-            return false;    
-        }
-
-        double factor = 1 / max_elem;
-        for (int s = 0; s < i; ++s) {
-            identity[i * m + s] *= factor;
-        }
-
-        for (int s = i; s < m; ++s) {
-            matrix[i * m + s] *= factor;
-            identity[i * m + s] *= factor;
-        }
-
-        for (int k = i + 1; k < m; ++k) {
-            double multiplier = -matrix[k * m + i];
-            for (int p = 0; p < i + 1; ++p) {
-                identity[k * m + p] += identity[i * m + p] * multiplier;
-            }
-
-            for (int p = i + 1; p < m; ++p) { 
-                matrix[k * m + p] += matrix[i * m + p] * multiplier;
-                identity[k * m + p] += identity[i * m + p] * multiplier;
-            }
-        }
-    }
-
-    for (int i = m - 1; i > 0; --i) {
-        for (int k = i - 1; k >= 0; --k) {
-            double multiplier = -matrix[k * m + i];
-            for (int p = 0; p < m; ++p) { 
-                identity[k * m + p] += identity[i * m + p] * multiplier;
-            }
-        }
-    }
-
-    return true;
-}
-
-void matrix_product(int n, int m, int k, double* a, double* b, double* c) {
-    
-    for (int i = 0; i < n*k; ++i) {
-        c[i] = 0;
-    }
-    
-    double sum00, sum01, sum02, sum10, sum11, sum12, sum20, sum21, sum22;
-    
-    int v3 = n%3;
-    int h3 = k%3;
-    
-    for (int i = 0; i < v3; ++i) {
-        for (int j = 0; j < h3; ++j) {
-            sum00 = 0;
-            for (int p = 0; p < m; ++p) {
-                sum00 += a[m*i + p] * b[k*p + j];
-            }
-            
-            c[k*i + j] = sum00;
-        }
-        for (int j = h3; j < k; j+=3) {
-            sum00 = 0; sum01 = 0; sum02 = 0;
-            for (int p = 0; p < m; ++p) {
-                double factor = a[m*i + p];
-                sum00 += factor * b[k*p + j];
-                sum01 += factor * b[k*p + j + 1];
-                sum02 += factor * b[k*p + j + 2];
-            }
-            c[k*i + j] = sum00;
-            c[k*i + j + 1] = sum01;
-            c[k*i + j + 2] = sum02;
-        }
-    }
-    
-    for (int i = v3; i < n; i+=3) {   
-        for (int j = 0; j < h3; ++j) {
-            sum00 = 0; sum01 = 0; sum02 = 0;
-            for (int p = 0; p < m; ++p) {
-                double factor = b[k*p + j];
-                sum00 += a[m*i + p] * factor;
-                sum01 += a[m*(i + 1) + p] * factor;
-                sum02 += a[m*(i + 2) + p] * factor;
-            }
-            c[k*i + j] = sum00;
-            c[k*(i + 1) + j] = sum01;
-            c[k*(i + 2) + j] = sum02;
-        }
-        
-        for (int j = h3; j < k; j+=3) {
-            sum00 = 0; sum01 = 0; sum02 = 0; sum10 = 0; sum11 = 0; sum12 = 0;
-            sum20 = 0; sum21 = 0; sum22 = 0;
-            for (int p = 0; p < m; ++p) {
-                sum00 += a[m*i + p] * b[k*p + j];
-                sum01 += a[m*i + p] * b[k*p + j + 1];
-                sum02 += a[m*i + p] * b[k*p + j + 2];
-                sum10 += a[m*(i + 1) + p] * b[k*p + j];
-                sum11 += a[m*(i + 1) + p] * b[k*p + j + 1];
-                sum12 += a[m*(i + 1) + p] * b[k*p + j + 2];
-                sum20 += a[m*(i + 2) + p] * b[k*p + j];
-                sum21 += a[m*(i + 2) + p] * b[k*p + j + 1];
-                sum22 += a[m*(i + 2) + p] * b[k*p + j + 2];
-            }
-            c[k*i + j] = sum00;
-            c[k*i + j + 1] = sum01; 
-            c[k*i + j + 2] = sum02;
-            c[k*(i + 1) + j] = sum10;
-            c[k*(i + 1)  + j + 1] = sum11;
-            c[k*(i + 1) + j + 2] = sum12;
-            c[k*(i + 2) + j] = sum20;
-            c[k*(i + 2) + j + 1] = sum21;
-            c[k*(i + 2) + j + 2] = sum22;
-        }
-    }    
 }

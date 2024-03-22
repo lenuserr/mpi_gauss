@@ -1,0 +1,1 @@
+void matrix_product(int n, int m, int k, double* a, double* b, double* c);
