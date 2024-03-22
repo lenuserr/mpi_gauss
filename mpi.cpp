@@ -1,7 +1,10 @@
 #define EPS 1e-14
-// 22.03.24. 12:00 let's go mpi gauss.
-// 15:30. Обратный ход Гаусса осталось.
-// Норму матрицы потом посчитать и заменить арг.
+// 19:40. Осталось добавить:
+// 1). Подсчёт обоих невязок.
+// 2). Обработку ошибок (если матрица не обращается типо).
+// 3). Посчитать норму матрицы и нормально использовать её в коде.
+// 4). Подсчёт времени работы одного процесса.
+// 5). Написать makefile, чтобы программа собиралась так, как требуется.
 #include "mpi.h"
 #include <stdio.h>
 #include <string.h>
@@ -265,6 +268,7 @@ void solution(int argc, char* argv[], MPI_Comm com, int p, int k) {
     int rows = get_rows(n, m, p, k);
     double* a = new double[rows*m*n];
     double* b = new double[rows*m];
+    double* x = new double[n];
     double* buf = new double[m*n];
     double* buf_b = new double[m];
     double* block1 = new double[m*m];
@@ -319,7 +323,6 @@ void solution(int argc, char* argv[], MPI_Comm com, int p, int k) {
         int loc_start_m = (i_glob_m + offset) / p;
         if (k == main_k) { loc_start_m++; }
 
-        int rows = get_rows(n, m, p, k);
         for (int i = loc_start_m; i < rows; ++i) {
             get_block(i, i_glob_m, n, m, f, l, a, block1);
             int multiplier_rows = (m + l2g(n, m, p, k, i * m) <= n ? m : l);
@@ -336,14 +339,49 @@ void solution(int argc, char* argv[], MPI_Comm com, int p, int k) {
             subtract_matrix_inplace(1, multiplier_rows, b + m*i, block3);
         }
     }
-    
+
     // if l and обратный ход гаусса летс го делать.
+    if (l && f % p == k) {
+        get_block(f/p, f, n, m, f, l, a, block1);  
+        inverse_matrix(l, block1, block2, 1e-10); // НОРМУ МАТРИЦЫ ПОТОМ ПОСЧИТАТЬ И ЗАМЕНИТЬ АРГ.
+        matrix_product(l, l, 1, block2, b + m*(f/p), block3);
+    }
+
+    if (l) { // сюда зайдут либо все процессы, либо никакой, поэтому всё норм
+        MPI_Bcast(block3, l, MPI_DOUBLE, f % p, com);
+        put_vector(f, m, f, l, block3, x);
+    }
+
+    for (int i_glob_m = f - 1; i_glob_m >= 0; --i_glob_m) {
+        memset(block2, 0, m*sizeof(double));
+        int i_loc_m = i_glob_m / p;
+        int owner = i_glob_m % p;
+        if (k == owner) { 
+            for (int j = i_glob_m + 1; j < h; ++j) {
+                get_block(i_loc_m, j, n, m, f, l, a, block1);
+                int cols = j < f ? m : l;
+                matrix_product(m, cols, 1, block1, x + m*j, block3);
+
+                for (int p = 0; p < m; ++p) {
+                    block2[p] += block3[p];
+                }                             
+            }
+
+            for (int vv = 0; vv < m; ++vv) {
+                buf_b[vv] = b[m*i_loc_m + vv] - block2[vv]; 
+            }
+        }
+
+        MPI_Bcast(buf_b, m, MPI_DOUBLE, owner, com);
+        put_vector(i_glob_m, m, f, l, buf_b, x);
+    }
 
     //print_matrix(a, n, m, p, k, buf, r, com);
     //print_b(b, n, m, p, k, buf, r, com);
 
     delete[] a;
     delete[] b;
+    delete[] x;
     delete[] buf;
     delete[] buf_b;
     delete[] block1;
