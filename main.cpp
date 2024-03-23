@@ -510,7 +510,7 @@ void solution(int argc, char* argv[], MPI_Comm com, int p, int k) {
                 get_block(0, j, n, m, f, l, buf, block2); 
                 matrix_product(multiplier_rows, m, block_cols, block1, block2, block3);
                 get_block(i, j, n, m, f, l, a, block2);
-                subtract_matrix_inplace(m, m, block2, block3);
+                subtract_matrix_inplace(multiplier_rows, block_cols, block2, block3);
                 put_block(i, j, n, m, f, l, block2, a);
             }
 
@@ -519,7 +519,6 @@ void solution(int argc, char* argv[], MPI_Comm com, int p, int k) {
         }
     }
 
-    // if l and обратный ход гаусса летс го делать.
     if (l && f % p == k) {
         get_block(f/p, f, n, m, f, l, a, block1);  
         if (!inverse_matrix(l, block1, block2, a_norm)) { err = -1; } 
@@ -601,7 +600,7 @@ void solution(int argc, char* argv[], MPI_Comm com, int p, int k) {
             get_block(i_loc_m, j, n, m, f, l, a, block1);
             int cols = j < f ? m : l;
             matrix_product(multiplier_rows, cols, 1, block1, x + m*j, block2);
-        
+                    
             for (int u = 0; u < multiplier_rows; ++u) {
                 block3[u] += block2[u];
             }          
@@ -618,12 +617,14 @@ void solution(int argc, char* argv[], MPI_Comm com, int p, int k) {
 
     if (k == 0) { printf("A:\n"); }
     print_matrix(a, n, m, p, k, buf, r, com);
+    //if (k == 0) { printf("\nb:\n"); }
+    //print_b(b, n, m, p, k, buf, r, com);
 
     if (k == 0) { 
         double r2 = r2_eval(n, x);
         t2 = get_cpu_time() - t2;
         printf("\nx:\n");
-        for (int i = 0; i < r; ++i) {
+        for (int i = 0; i < std::min(r, n); ++i) {
             printf(" %10.3e", x[i]);
         }
         printf("\n\n");
