@@ -1,13 +1,19 @@
 #define EPS 1e-14
-// 00:50. Осталось добавить:
-// 1). Подсчёт времени работы одного процесса.
-// 2). Подсчёт обоих невязок.
+
 #include "mpi.h"
 #include <stdio.h>
 #include <string.h>
+#include <sys/resource.h>
+
 #include <string>
 #include <cmath>
 #include "main.h"
+
+double get_cpu_time() {
+    struct rusage buf;
+    getrusage(RUSAGE_THREAD, &buf);
+    return buf.ru_utime.tv_sec + buf.ru_utime.tv_usec * 1e-6;
+}
 
 int l2g(int m, int p, int k, int i_loc) {
     int i_loc_m = i_loc / m;
@@ -41,7 +47,7 @@ int get_k(int m, int p, int i_glob) {
     return i_glob_m % p;
 }
 
-void init_matrix(double* a, int n, int m, int p, int k, int s, double (*f)(int, int, int, int)) {
+void init_matrix(double* a, int n, int m, int p, int k, int s, double (*func)(int, int, int, int)) {
     int rows = get_rows(n, m, p, k); // число блочных строк в процессе k
 
     for (int i_loc_m = 0; i_loc_m < rows; ++i_loc_m) {
@@ -51,7 +57,7 @@ void init_matrix(double* a, int n, int m, int p, int k, int s, double (*f)(int, 
                 break;
             }
             for (int j = 0; j < n; ++j) {
-                a[n*i_loc + j] = f(s, n, i_glob, j);
+                a[n*i_loc + j] = func(s, n, i_glob, j);
             }
         }
     }
@@ -229,7 +235,7 @@ double matrix_norm(double* a, /* своя часть */ int n, int m, int p, int
     return norm;
 }
 
-double f(int s, int n, int i, int j) { 
+double func(int s, int n, int i, int j) { 
     switch(s) {
         case 1:
             return n - std::max(i, j);
@@ -309,7 +315,7 @@ int read_matrix(double* a, int n, int m, int p, int k,
 
 void print_matrix(double* a, int n, int m, int p, int k,
     double* buf, int max_print, MPI_Comm com) {
-
+    
     int main_k = 0; /*только 0*/
     int max_b = (n + m - 1) / m;
     int printed_rows = 0;
@@ -367,6 +373,28 @@ void print_b(double* a, int n, int m, int p, int k,
     }
 }
 
+double r2_eval(int n, double* x) {   
+    double r2 = 0;
+    for (int i = 1; i <= n; ++i) {
+        r2 += std::fabs(x[i - 1] - (i % 2));
+    }
+
+    return r2;
+}
+
+void free_memory(double* a, double* b, double* x, double* buf, double* buf_b,
+    double* block1, double* block2, double* block3) {
+
+    delete[] a;
+    delete[] b;
+    delete[] x;
+    delete[] buf;
+    delete[] buf_b;
+    delete[] block1;
+    delete[] block2;
+    delete[] block3;
+}
+
 void solution(int argc, char* argv[], MPI_Comm com, int p, int k);
 int main(int argc, char* argv[]) {
 
@@ -393,11 +421,9 @@ void solution(int argc, char* argv[], MPI_Comm com, int p, int k) {
     int rows = get_rows(n, m, p, k);
     double* a = new double[rows*m*n];
     double* buf = new double[m*n];
-    
-    double t1 = 0, t2 = 0;
 
     if (s) {
-        init_matrix(a, /* своя часть */ n, m, p, k, s, &f);
+        init_matrix(a, /* своя часть */ n, m, p, k, s, &func);
     } else {
         const char* name_file = argv[argc - 1];
         if (read_matrix(a, n, m, p, k, name_file, buf /* буфер m x n на блочную строку */, com)) {
@@ -405,7 +431,7 @@ void solution(int argc, char* argv[], MPI_Comm com, int p, int k) {
             if (k == 0) {
                 printf (
                 "%s : Task = %d Res1 = %e Res2 = %e T1 = %.2f T2 = %.2f S = %d N = %d M = %d P = %d\n",
-                argv[0], task, -1., -1., t1, t2, s, n, m, p);
+                argv[0], task, -1., -1., 0., 0., s, n, m, p);
             }
 
             delete[] a;
@@ -422,10 +448,10 @@ void solution(int argc, char* argv[], MPI_Comm com, int p, int k) {
     double* block3 = new double[m*m];
 
     init_b(a, b, n, m, p, k);
-    //print_matrix(a, n, m, p, k, buf, r, com);
-    //print_b(b, n, m, p, k, buf, r, com);
 
     double a_norm = matrix_norm(a, n, m, p, k, com);
+    double t1 = get_cpu_time();
+
     int f = n / m;
     int l = n - f * m;
     int h = l ? f + 1 : f;
@@ -436,7 +462,6 @@ void solution(int argc, char* argv[], MPI_Comm com, int p, int k) {
         int main_k = i_glob_m % p; 
         if (k == main_k) {
             get_block(i_loc_m, i_glob_m, n, m, f, l, a, block1);
-            // НОРМУ МАТРИЦЫ ПОТОМ ПОСЧИТАТЬ И ЗАМЕНИТЬ АРГ.
             if (!inverse_matrix(m, block1, block2, a_norm)) { err = -1; }             
             for (int j_glob_m = i_glob_m; j_glob_m < f; ++j_glob_m) {
                 get_block(i_loc_m, j_glob_m, n, m, f, l, a, block1); 
@@ -466,17 +491,10 @@ void solution(int argc, char* argv[], MPI_Comm com, int p, int k) {
             if (k == 0) {
                 printf (
                 "%s : Task = %d Res1 = %e Res2 = %e T1 = %.2f T2 = %.2f S = %d N = %d M = %d P = %d\n",
-                argv[0], task, -1., -1., t1, t2, s, n, m, p);
+                argv[0], task, -1., -1., t1, 0., s, n, m, p);
             }
 
-            delete[] a;
-            delete[] b;
-            delete[] x;
-            delete[] buf;
-            delete[] buf_b;
-            delete[] block1;
-            delete[] block2;
-            delete[] block3;
+            free_memory(a, b, x, buf, buf_b, block1, block2, block3);
             return;
         }
         
@@ -504,7 +522,6 @@ void solution(int argc, char* argv[], MPI_Comm com, int p, int k) {
     // if l and обратный ход гаусса летс го делать.
     if (l && f % p == k) {
         get_block(f/p, f, n, m, f, l, a, block1);  
-        // НОРМУ МАТРИЦЫ ПОТОМ ПОСЧИТАТЬ И ЗАМЕНИТЬ АРГ.
         if (!inverse_matrix(l, block1, block2, a_norm)) { err = -1; } 
         matrix_product(l, l, 1, block2, b + m*(f/p), block3);
     }
@@ -513,17 +530,10 @@ void solution(int argc, char* argv[], MPI_Comm com, int p, int k) {
         if (k == 0) {
             printf (
             "%s : Task = %d Res1 = %e Res2 = %e T1 = %.2f T2 = %.2f S = %d N = %d M = %d P = %d\n",
-            argv[0], task, -1., -1., t1, t2, s, n, m, p);
+            argv[0], task, -1., -1., t1, 0., s, n, m, p);
         }
 
-        delete[] a;
-        delete[] b;
-        delete[] x;
-        delete[] buf;
-        delete[] buf_b;
-        delete[] block1;
-        delete[] block2;
-        delete[] block3;
+        free_memory(a, b, x, buf, buf_b, block1, block2, block3);
         return;
     }    
 
@@ -556,23 +566,71 @@ void solution(int argc, char* argv[], MPI_Comm com, int p, int k) {
         put_vector(i_glob_m, m, f, l, buf_b, x);
     }
 
-    //print_matrix(a, n, m, p, k, buf, r, com);
-    //print_b(b, n, m, p, k, buf, r, com);
+    t1 = get_cpu_time() - t1;
+
+    // снова инициализируем a и b, чтобы посчитать r1 невязку.
+    if (s) {
+        init_matrix(a, /* своя часть */ n, m, p, k, s, &func);
+    } else {
+        const char* name_file = argv[argc - 1];
+        if (read_matrix(a, n, m, p, k, name_file, buf /* буфер m x n на блочную строку */, com)) {
+            
+            if (k == 0) {
+                printf (
+                "%s : Task = %d Res1 = %e Res2 = %e T1 = %.2f T2 = %.2f S = %d N = %d M = %d P = %d\n",
+                argv[0], task, -1., -1., t1, 0., s, n, m, p);
+            }
+
+            free_memory(a, b, x, buf, buf_b, block1, block2, block3);
+            return;
+        }
+    }
+
+    init_b(a, b, n, m, p, k);
+    
+    double t2 = get_cpu_time();
+
+    double sum = 0;
+    double global_sum;
+    
+    for (int i_loc_m = 0; i_loc_m < rows; ++i_loc_m) {
+        int max_i_loc = ((i_loc_m + 1) * m) - 1;
+        int multiplier_rows = l2g(m, p, k, max_i_loc) < n ? m : l;
+        memset(block3, 0, multiplier_rows*sizeof(double));
+        for (int j = 0; j < h; ++j) { 
+            get_block(i_loc_m, j, n, m, f, l, a, block1);
+            int cols = j < f ? m : l;
+            matrix_product(multiplier_rows, cols, 1, block1, x + m*j, block2);
+        
+            for (int u = 0; u < multiplier_rows; ++u) {
+                block3[u] += block2[u];
+            }          
+        }
+
+        for (int u = 0; u < multiplier_rows; ++u) {
+            sum += std::fabs(block3[u] - b[m*i_loc_m + u]);
+        }  
+    }
+
+    MPI_Allreduce(&sum, &global_sum, 1, MPI_DOUBLE, MPI_SUM, com);
+    double b_norm = matrix_norm(b, 1, m, p, k, com);
+    double r1 = global_sum / b_norm;
+
+    if (k == 0) { printf("A:\n"); }
+    print_matrix(a, n, m, p, k, buf, r, com);
 
     if (k == 0) { 
-        printf("x:\n");
+        double r2 = r2_eval(n, x);
+        t2 = get_cpu_time() - t2;
+        printf("\nx:\n");
         for (int i = 0; i < r; ++i) {
             printf(" %10.3e", x[i]);
         }
-        printf("\n");
+        printf("\n\n");
+        printf (
+        "%s : Task = %d Res1 = %e Res2 = %e T1 = %.2f T2 = %.2f S = %d N = %d M = %d P = %d\n",
+        argv[0], task, r1, r2, t1, t2, s, n, m, p);
     }
 
-    delete[] a;
-    delete[] b;
-    delete[] x;
-    delete[] buf;
-    delete[] buf_b;
-    delete[] block1;
-    delete[] block2;
-    delete[] block3;
+    free_memory(a, b, x, buf, buf_b, block1, block2, block3);
 }
