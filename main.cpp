@@ -420,7 +420,7 @@ void solution(int argc, char* argv[], MPI_Comm com, int p, int k) {
 
     int rows = get_rows(n, m, p, k);
     double* a = new double[rows*m*n];
-    double* buf = new double[m*n];
+    double* buf = new double[m*n + m];
 
     if (s) {
         init_matrix(a, /* своя часть */ n, m, p, k, s, &func);
@@ -463,7 +463,7 @@ void solution(int argc, char* argv[], MPI_Comm com, int p, int k) {
         if (k == main_k) {
             get_block(i_loc_m, i_glob_m, n, m, f, l, a, block1);
             if (!inverse_matrix(m, block1, block2, a_norm)) { err = -1; }             
-            for (int j_glob_m = i_glob_m; j_glob_m < f; ++j_glob_m) {
+            for (int j_glob_m = i_glob_m + 1; j_glob_m < f; ++j_glob_m) {
                 get_block(i_loc_m, j_glob_m, n, m, f, l, a, block1); 
                 matrix_product(m, m, m, block2, block1, block3); 
                 put_block(i_loc_m, j_glob_m, n, m, f, l, block3, a);
@@ -478,13 +478,11 @@ void solution(int argc, char* argv[], MPI_Comm com, int p, int k) {
             matrix_product(m, m, 1, block2, b + m * i_loc_m, block3); 
             put_vector(i_loc_m, m, f, l, block3, b);
 
-            memcpy(buf, a + m*n*i_loc_m, n*m*sizeof(double)); 
-            memcpy(buf_b, b + m*i_loc_m, m*sizeof(double));
+            memcpy(buf, a + m*n*i_loc_m, n*m*sizeof(double));
+            memcpy(buf + n*m, b + m*i_loc_m, m*sizeof(double)); 
         } 
 
-        // насколько тут всё плохо и можно ли сделать лучше, чтобы не было столько обменов?
-        MPI_Bcast(buf, n*m, MPI_DOUBLE, main_k, com);
-        MPI_Bcast(buf_b, m, MPI_DOUBLE, main_k, com); 
+        MPI_Bcast(buf, n*m + m, MPI_DOUBLE, main_k, com); 
         MPI_Bcast(&err, 1, MPI_INT, main_k, com);
 
         if (err) {
@@ -505,7 +503,7 @@ void solution(int argc, char* argv[], MPI_Comm com, int p, int k) {
         for (int i = loc_start_m; i < rows; ++i) {
             get_block(i, i_glob_m, n, m, f, l, a, block1);
             int multiplier_rows = (m + l2g(m, p, k, i * m) <= n ? m : l);
-            for (int j = 0; j < h; ++j) {
+            for (int j = i_glob_m + 1; j < h; ++j) {
                 int block_cols = j < f ? m : l;
                 get_block(0, j, n, m, f, l, buf, block2); 
                 matrix_product(multiplier_rows, m, block_cols, block1, block2, block3);
@@ -514,7 +512,7 @@ void solution(int argc, char* argv[], MPI_Comm com, int p, int k) {
                 put_block(i, j, n, m, f, l, block2, a);
             }
 
-            matrix_product(multiplier_rows, m, 1, block1, buf_b, block3);
+            matrix_product(multiplier_rows, m, 1, block1, buf + n*m, block3);
             subtract_matrix_inplace(1, multiplier_rows, b + m*i, block3);
         }
     }
