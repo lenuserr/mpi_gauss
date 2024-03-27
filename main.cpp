@@ -290,7 +290,7 @@ int read_matrix(double* a, int n, int m, int p, int k,
             err += read_array(fp, buf, n*num_rows);
             if (owner == k) {
                 // копируем на место 
-                memcpy(a + b_loc*m*n, buf, n*num_rows*sizeof(double)); // ТУТ ВРОДЕ ДИЧЬ НАПИСАНА ПРО B_LOC
+                memcpy(a + b_loc*m*n, buf, n*num_rows*sizeof(double)); 
             } else {
                 // отправляем получателю
                 MPI_Send(buf, n*num_rows, MPI_DOUBLE, owner, 0 /*tag*/, com);
@@ -517,11 +517,14 @@ void solution(int argc, char* argv[], MPI_Comm com, int p, int k) {
         }
     }
 
-    if (l && f % p == k) {
-        get_block(f/p, f, n, m, f, l, a, block1);  
+    int var = f/p; 
+    if (l && f == k + var*p) {
+        get_block(var, f, n, m, f, l, a, block1);  
         if (!inverse_matrix(l, block1, block2, a_norm)) { err = -1; } 
-        matrix_product(l, l, 1, block2, b + m*(f/p), block3);
+        matrix_product(l, l, 1, block2, b + m*var, block3);
     }
+
+    MPI_Bcast(&err, 1, MPI_INT, f - var*p, com);
 
     if (err) {
         if (k == 0) {
@@ -535,7 +538,7 @@ void solution(int argc, char* argv[], MPI_Comm com, int p, int k) {
     }    
 
     if (l) { // сюда зайдут либо все процессы, либо никакой, поэтому всё норм
-        MPI_Bcast(block3, l, MPI_DOUBLE, f % p, com);
+        MPI_Bcast(block3, l, MPI_DOUBLE, f - var*p, com);
         put_vector(f, m, f, l, block3, x);
     }
 
@@ -615,9 +618,7 @@ void solution(int argc, char* argv[], MPI_Comm com, int p, int k) {
 
     if (k == 0) { printf("A:\n"); }
     print_matrix(a, n, m, p, k, buf, r, com);
-    //if (k == 0) { printf("\nb:\n"); }
-    //print_b(b, n, m, p, k, buf, r, com);
-
+    
     if (k == 0) { 
         double r2 = r2_eval(n, x);
         t2 = get_cpu_time() - t2;
